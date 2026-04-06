@@ -1,29 +1,157 @@
 """
 Web search tool for the Research Agent.
-Uses DuckDuckGo (free, no API key needed) via duckduckgo-search.
+
+Uses DuckDuckGo via the `ddgs` package (free, no API key required).
+DDGS is synchronous only — we wrap every call in asyncio.to_thread()
+so it plays nicely with FastAPI's async event loop.
+
+Two search types:
+  web_search_tool  — general text search (news, analysis, filings)
+  news_search_tool — recent news only (past week), higher signal for stocks
 """
-from duckduckgo_search import DDGS
+import asyncio
+from typing import List
+from ddgs import DDGS
 from app.core.logging import logger
 
 
-async def web_search_tool(query: str, max_results: int = 5) -> str:
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _run_text_search(query: str, max_results: int) -> List[dict]:
+    """Sync DDGS text search — runs inside asyncio.to_thread."""
+    with DDGS() as ddgs:
+        return ddgs.text(
+            query,
+            max_results=max_results,
+            safesearch="moderate",
+        )
+
+
+def _run_news_search(query: str, max_results: int) -> List[dict]:
+    """Sync DDGS news search — runs inside asyncio.to_thread."""
+    with DDGS() as ddgs:
+        return ddgs.news(
+            query,
+            max_results=max_results,
+            safesearch="moderate",
+            timelimit="w",  # past week — most relevant for stock research
+        )
+
+
+def _format_text_results(results: List[dict]) -> str:
+    """Format text search results into a clean string for the LLM."""
+    if not results:
+        return "No results found."
+    parts = []
+    for i, r in enumerate(results, 1):
+        parts.append(
+            f"[{i}] {r.get('title', 'No title')}\n"
+            f"    URL: {r.get('href', '')}\n"
+            f"    {r.get('body', 'No snippet')}"
+        )
+    return "\n\n".join(parts)
+
+
+def _format_news_results(results: List[dict]) -> str:
+    """Format news search results into a clean string for the LLM."""
+    if not results:
+        return "No recent news found."
+    parts = []
+    for i, r in enumerate(results, 1):
+        parts.append(
+            f"[{i}] {r.get('title', 'No title')}\n"
+            f"    Source: {r.get('source', '')} | Date: {r.get('date', '')}\n"
+            f"    URL: {r.get('url', '')}\n"
+            f"    {r.get('body', 'No summary')}"
+        )
+    return "\n\n".join(parts)
+
+
+# ── Public tool functions ─────────────────────────────────────────────────────
+
+async def web_search_tool(
+    query: str,
+    max_results: int = 5,
+    finance_context: bool = True,
+) -> str:
     """
-    Search the web using DuckDuckGo.
-    Returns formatted string of results.
+    General web search using DuckDuckGo.
+
+    Args:
+        query:           Search query string.
+        max_results:     Max number of results to return (default 5).
+        finance_context: If True, appends "investment finance" to the query
+                         to bias results toward financial content.
+
+    Returns:
+        Formatted string of search results ready for LLM consumption.
     """
-    logger.info(f"[Web Search] Query: {query[:80]}")
+    search_query = f"{query} investment finance" if finance_context else query
+    logger.info(f"[WebSearch] text | query='{search_query[:80]}'")
+
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(
-                query + " investment finance stock",
-                max_results=max_results,
-            ))
-        formatted = []
-        for r in results:
-            formatted.append(f"Title: {r.get('title', '')}\n"
-                             f"URL: {r.get('href', '')}\n"
-                             f"Snippet: {r.get('body', '')}\n")
-        return "\n---\n".join(formatted)
+        results = await asyncio.to_thread(
+            _run_text_search, search_query, max_results
+        )
+        formatted = _format_text_results(results)
+        logger.info(f"[WebSearch] Got {len(results)} text results")
+        return formatted
+
     except Exception as e:
-        logger.error(f"[Web Search] Failed: {e}")
-        return f"Web search unavailable: {e}"
+        logger.error(f"[WebSearch] text search failed: {e}")
+        return f"[WebSearch unavailable: {e}]"
+
+
+async def news_search_tool(
+    query: str,
+    max_results: int = 5,
+) -> str:
+    """
+    Recent news search (past week) using DuckDuckGo News.
+    Higher signal than general web search for stock-related queries.
+
+    Args:
+        query:       Search query (ticker, company name, topic).
+        max_results: Max number of news items (default 5).
+
+    Returns:
+        Formatted string of news items ready for LLM consumption.
+    """
+    logger.info(f"[WebSearch] news | query='{query[:80]}'")
+
+    try:
+        results = await asyncio.to_thread(
+            _run_news_search, query, max_results
+        )
+        formatted = _format_news_results(results)
+        logger.info(f"[WebSearch] Got {len(results)} news results")
+        return formatted
+
+    except Exception as e:
+        logger.error(f"[WebSearch] news search failed: {e}")
+        return f"[NewsSearch unavailable: {e}]"
+
+
+async def combined_search_tool(
+    query: str,
+    max_web: int = 3,
+    max_news: int = 3,
+) -> str:
+    """
+    Run web + news searches concurrently and combine results.
+    Used by the Research Agent for maximum coverage.
+
+    Returns:
+        Combined formatted string with both web and news sections.
+    """
+    logger.info(f"[WebSearch] combined | query='{query[:80]}'")
+
+    web_task = web_search_tool(query, max_results=max_web)
+    news_task = news_search_tool(query, max_results=max_news)
+
+    web_results, news_results = await asyncio.gather(web_task, news_task)
+
+    return (
+        f"=== WEB RESULTS ===\n{web_results}\n\n"
+        f"=== RECENT NEWS ===\n{news_results}"
+    )
