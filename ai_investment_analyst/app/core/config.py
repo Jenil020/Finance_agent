@@ -5,7 +5,7 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     # ── LLM (Google Gemini - free tier) ──────────────────────────────────────
-    google_api_key: str = ""
+    google_api_key: str = "AIzaSyB2yTehlGvr8B6CT8KBdF9vwbYgT0aFOjc"
     gemini_model: str = "gemini-1.5-flash"          # Free tier, fast
     gemini_embed_model: str = "text-embedding-004"  # Free tier embedding
 
