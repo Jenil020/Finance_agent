@@ -3,38 +3,104 @@ Custom Gemini embedding model using the new google-genai SDK.
 
 We implement LlamaIndex's BaseEmbedding directly instead of using
 llama-index-embeddings-gemini, which still depends on the deprecated
-google-generativeai package. This way we use the current google.genai
-SDK cleanly with no deprecation warnings.
+google-generativeai package.
 
-Free model: text-embedding-004 → 768-dimensional vectors.
+Free model: gemini-embedding-001 → 768-dimensional vectors.
+
+Rate limiting strategy (fixes 'Server disconnected' error):
+─────────────────────────────────────────────────────────────
+Gemini free tier: 1500 RPM (25 RPS) for embeddings.
+Root cause of the crash: LlamaIndex fires 1066 sync HTTP calls with
+NO delay → overwhelms httpx connection pool → server drops connection.
+
+Fix: SimpleRateLimiter enforces a minimum gap between API calls.
+We also override _get_text_embeddings with tenacity retry on connection
+errors (httpx.RemoteProtocolError), which handles transient drops.
+
+Settings (conservative, well under free tier):
+  EMBED_REQUESTS_PER_SECOND = 8   →  8 RPS  (limit is 25 RPS)
+  embed_batch_size           = 5  →  5 texts per API call
 """
-from typing import List
+import time
 import asyncio
+from typing import List
+
+import httpx
 import google.genai as genai
 from google.genai import types as genai_types
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
+
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.core.bridge.pydantic import Field
+
 from app.core.config import settings
 from app.core.logging import logger
 
 
+# ── Rate limiter ──────────────────────────────────────────────────────────────
+
+class SimpleRateLimiter:
+    """
+    Token-bucket style rate limiter with a minimum inter-call interval.
+
+    LlamaIndex calls self.rate_limiter.acquire() before each batch flush
+    (see BaseEmbedding.get_text_embedding_batch). This gives us a clean
+    hook to insert a sleep without monkey-patching LlamaIndex internals.
+    """
+
+    def __init__(self, requests_per_second: float = 8.0):
+        self._min_interval = 1.0 / requests_per_second
+        self._last_call: float = 0.0
+
+    def acquire(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_call
+        wait = self._min_interval - elapsed
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
+
+
+# ── Retry decorator for connection errors ─────────────────────────────────────
+
+_EMBED_RETRY = retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((
+        httpx.RemoteProtocolError,
+        httpx.ConnectError,
+        httpx.TimeoutException,
+        ConnectionError,
+    )),
+    reraise=True,
+)
+
+
+# ── Embedding model ───────────────────────────────────────────────────────────
+
 class GeminiEmbedding(BaseEmbedding):
     """
-    LlamaIndex-compatible embedding model backed by google.genai.
+    LlamaIndex-compatible Gemini embedding model.
 
-    Implements the 3 required abstract methods:
-      - _get_query_embedding   (sync, single)
-      - _get_text_embedding    (sync, single)
-      - _aget_query_embedding  (async, single)
-
-    The base class handles batching and caching on top of these.
+    Fixes vs original:
+      1. SimpleRateLimiter wired into LlamaIndex's rate_limiter hook
+         → enforces gap between batch calls at the LlamaIndex level.
+      2. _get_text_embeddings overridden with per-chunk delay + retry
+         → handles transient 'Server disconnected' errors gracefully.
+      3. Async batch uses asyncio.Semaphore to cap concurrency
+         → prevents overwhelming the connection pool.
     """
 
-    model_name: str = Field(default="text-embedding-004")
+    model_name: str = Field(default="gemini-embedding-001")
     api_key: str = Field(default="")
 
-    # We keep the genai client out of pydantic fields (not serialisable)
-    _client: genai.Client = None   # type: ignore[assignment]
+    # Non-pydantic private attribute for the client
+    _client: genai.Client = None  # type: ignore[assignment]
 
     def _get_client(self) -> genai.Client:
         if self._client is None:
@@ -44,31 +110,41 @@ class GeminiEmbedding(BaseEmbedding):
             )
         return self._client
 
-    # ── Core sync embedding ──────────────────────────────────────────────────
+    # ── Sync single-text embedding (with retry) ───────────────────────────────
 
-    def _embed(self, text: str) -> List[float]:
-        """Call Gemini embed_content synchronously."""
+    @_EMBED_RETRY
+    def _embed_one(self, text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> List[float]:
+        """Single embed call with retry on connection errors."""
         client = self._get_client()
         response = client.models.embed_content(
             model=self.model_name,
             contents=text,
-            config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+            config=genai_types.EmbedContentConfig(task_type=task_type),
         )
         return list(response.embeddings[0].values)
 
     def _get_text_embedding(self, text: str) -> List[float]:
-        return self._embed(text)
+        return self._embed_one(text, "RETRIEVAL_DOCUMENT")
 
     def _get_query_embedding(self, query: str) -> List[float]:
-        client = self._get_client()
-        response = client.models.embed_content(
-            model=self.model_name,
-            contents=query,
-            config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
-        )
-        return list(response.embeddings[0].values)
+        return self._embed_one(query, "RETRIEVAL_QUERY")
 
-    # ── Async embedding ──────────────────────────────────────────────────────
+    def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """
+        Override the default list-comprehension with per-chunk throttling.
+
+        LlamaIndex calls this for each batch (of size embed_batch_size).
+        We add a small sleep between individual calls inside the batch
+        for extra safety on top of the batch-level rate limiter.
+        """
+        results = []
+        for i, text in enumerate(texts):
+            if i > 0:
+                time.sleep(0.12)   # 120ms = ~8 RPS within a batch
+            results.append(self._embed_one(text, "RETRIEVAL_DOCUMENT"))
+        return results
+
+    # ── Async embedding ───────────────────────────────────────────────────────
 
     async def _aget_query_embedding(self, query: str) -> List[float]:
         client = self._get_client()
@@ -88,13 +164,19 @@ class GeminiEmbedding(BaseEmbedding):
         )
         return list(response.embeddings[0].values)
 
-    # ── Batch async (overrides base for efficiency) ──────────────────────────
-
     async def _aget_text_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Embed a batch of texts concurrently."""
-        tasks = [self._aget_text_embedding(t) for t in texts]
-        results = await asyncio.gather(*tasks)
-        logger.debug(f"[Embeddings] Batch embedded {len(texts)} chunks")
+        """
+        Async batch embedding with a semaphore to cap concurrency.
+        Max 5 concurrent requests → stays well under connection pool limits.
+        """
+        sem = asyncio.Semaphore(5)
+
+        async def _embed_with_sem(text: str) -> List[float]:
+            async with sem:
+                return await self._aget_text_embedding(text)
+
+        results = await asyncio.gather(*[_embed_with_sem(t) for t in texts])
+        logger.debug(f"[Embeddings] Async batch: {len(texts)} chunks embedded")
         return list(results)
 
 
@@ -110,7 +192,13 @@ def get_embed_model() -> GeminiEmbedding:
         _embed_model = GeminiEmbedding(
             model_name=settings.gemini_embed_model,
             api_key=settings.google_api_key,
-            embed_batch_size=10,   # stay under free-tier rate limits
+            embed_batch_size=5,            # 5 texts per LlamaIndex batch call
+            rate_limiter=SimpleRateLimiter(
+                requests_per_second=8.0    # 8 RPS << free tier limit of 25 RPS
+            ),
         )
-        logger.info(f"[Embeddings] Loaded model: {settings.gemini_embed_model}")
+        logger.info(
+            f"[Embeddings] Model ready: {settings.gemini_embed_model} "
+            f"| batch_size=5 | rate=8 RPS"
+        )
     return _embed_model

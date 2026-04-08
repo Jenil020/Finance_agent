@@ -4,7 +4,7 @@ Document ingestion pipeline.
 Flow:
   file paths → SimpleDirectoryReader (PDF/DOCX/CSV/TXT)
              → SentenceSplitter (semantic chunking)
-             → GeminiEmbedding (text-embedding-004)
+             → GeminiEmbedding (gemini-embedding-001)
              → QdrantVectorStore (local disk)
 
 No Celery — pure async Python (sufficient for a resume project;

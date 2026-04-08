@@ -31,7 +31,7 @@ def _ensure_collection(client: QdrantClient) -> None:
         client.create_collection(
             collection_name=settings.qdrant_collection,
             vectors_config=qdrant_models.VectorParams(
-                size=settings.qdrant_vector_size,   # 768 for text-embedding-004
+                size=settings.qdrant_vector_size,   # 768 for models/text_embedding_004
                 distance=qdrant_models.Distance.COSINE,
             ),
         )

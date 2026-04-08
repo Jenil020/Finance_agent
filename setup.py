@@ -94,7 +94,7 @@ def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
 
 
 def pip_install(packages: list[str]) -> None:
-    print("\n📦 Installing dependencies...\n" + "─" * 50)
+    print("\n Installing dependencies...\n" + "─" * 50)
     run([sys.executable, "-m", "pip", "install", "--upgrade", "pip", "-q",
          "--break-system-packages"])
     # Install in batches to show progress cleanly
@@ -104,7 +104,7 @@ def pip_install(packages: list[str]) -> None:
         print(f"  Installing: {', '.join(p.split('>=')[0] for p in batch)}")
         run([sys.executable, "-m", "pip", "install"] + batch + ["-q",
             "--break-system-packages"])
-    print("\n✅ All dependencies installed!")
+    print("\n All dependencies installed!")
 
 
 def check_env() -> tuple[list, list]:
@@ -117,28 +117,28 @@ def check_env() -> tuple[list, list]:
     if env_file.exists():
         from dotenv import load_dotenv
         load_dotenv()
-        print("\n  ✅ .env file found and loaded")
+        print("\n   .env file found and loaded")
     else:
         warnings.append(".env file not found — copy .env.example and fill in your keys")
-        print("\n  ⚠️  .env file not found — run: cp .env.example .env")
+        print("\n    .env file not found — run: cp .env.example .env")
 
     # Check required vars
     for var, desc in REQUIRED_ENV_VARS.items():
         val = os.getenv(var, "")
         if not val or val.startswith("your_"):
             missing.append((var, desc))
-            print(f"  ❌ {var} — NOT SET ({desc})")
+            print(f"   {var} — NOT SET ({desc})")
         else:
-            print(f"  ✅ {var} — set ({val[:8]}...)")
+            print(f"   {var} — set ({val[:8]}...)")
 
     # Check optional vars
     for var, desc in OPTIONAL_ENV_VARS.items():
         val = os.getenv(var, "")
         if not val or val.startswith("your_"):
             warnings.append(f"{var} not set — {desc}")
-            print(f"  ⚠️  {var} — not set (optional: {desc})")
+            print(f"    {var} — not set (optional: {desc})")
         else:
-            print(f"  ✅ {var} — set")
+            print(f"   {var} — set")
 
     return missing, warnings
 
@@ -152,7 +152,7 @@ def create_data_dirs() -> None:
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
-    print(f"\n  ✅ Data directories ready")
+    print(f"\n   Data directories ready")
 
 
 def verify_imports() -> list[str]:
@@ -176,21 +176,21 @@ def verify_imports() -> list[str]:
     for module, label in checks:
         try:
             __import__(module)
-            print(f"  ✅ {label}")
+            print(f"   {label}")
         except ImportError as e:
-            print(f"  ❌ {label} — {e}")
+            print(f"   {label} — {e}")
             failed.append(label)
     return failed
 
 
 def print_free_tier_info() -> None:
-    print("\n🆓 Free resources needed:\n" + "─" * 50)
+    print("\n Free resources needed:\n" + "─" * 50)
     for service, url in FREE_TIER_LINKS.items():
         print(f"  • {service}: {url}")
 
 
 def print_next_steps(missing_env: list) -> None:
-    print("\n🚀 Next steps:\n" + "─" * 50)
+    print("\n Next steps:\n" + "─" * 50)
     step = 1
 
     if missing_env:
@@ -230,32 +230,32 @@ def main() -> None:
     pip_install(DEPENDENCIES)
 
     # 2. Create runtime dirs
-    print("\n📁 Creating runtime directories...")
+    print("\n Creating runtime directories...")
     create_data_dirs()
 
     # 3. Verify imports
-    print("\n🔍 Verifying package imports...\n" + "─" * 50)
+    print("\n Verifying package imports...\n" + "─" * 50)
     failed_imports = verify_imports()
 
     # 4. Check environment
-    print("\n🔑 Checking environment variables...\n" + "─" * 50)
+    print("\n Checking environment variables...\n" + "─" * 50)
     missing_env, env_warnings = check_env()
 
     # 5. Print free tier info
     print_free_tier_info()
 
     # 6. Summary
-    print("\n📋 Setup Summary\n" + "─" * 50)
+    print("\n Setup Summary\n" + "─" * 50)
     if not failed_imports and not missing_env:
-        print("  🎉 Everything looks good — ready to run!")
+        print("   Everything looks good — ready to run!")
     else:
         if failed_imports:
-            print(f"  ❌ Failed imports: {failed_imports}")
+            print(f"   Failed imports: {failed_imports}")
         if missing_env:
-            print(f"  ❌ Missing env vars: {[v for v, _ in missing_env]}")
+            print(f"   Missing env vars: {[v for v, _ in missing_env]}")
         if env_warnings:
             for w in env_warnings:
-                print(f"  ⚠️  {w}")
+                print(f"    {w}")
 
     print_next_steps(missing_env)
 
