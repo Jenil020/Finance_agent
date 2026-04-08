@@ -1,0 +1,5 @@
+.env
+.env.*
+.venv/
+__pycache__/
+ai_investment_analyst/app/core/config.py
