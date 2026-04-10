@@ -1,13 +1,26 @@
-"""App-wide settings loaded from .env via pydantic-settings."""
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+import os
+from pathlib import Path
+
+from pydantic_settings import BaseSettings
+
+"""App-wide settings loaded from .env via pydantic-settings."""
+
+
+BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
     # ── LLM (Google Gemini - free tier) ──────────────────────────────────────
-    google_api_key: str = "AIzaSyCP2gL1nBa3cGDJBIc3dcqguzdIXFpBi0E"
-    gemini_model: str = "gemini-1.5-flash"          # Free tier, fast
+    google_api_key: str = "AIzaSyC4zwwOJVo-_9uPJWsN2qeJPURIEcPdGr8"
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_model_fallbacks: tuple[str, ...] = (
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-flash-latest",
+    )
     gemini_embed_model: str = "gemini-embedding-001"  # Free tier embedding
+    gemini_embed_output_dim: int = 3072
 
     # ── Redis (Upstash free or local) ────────────────────────────────────────
     redis_url: str = "redis://localhost:6379"
@@ -15,8 +28,8 @@ class Settings(BaseSettings):
     redis_session_ttl: int = 86400   # 24 hour conversation TTL
 
     # ── LangSmith (optional - free 5k traces/month) ──────────────────────────
-    langchain_api_key: str = ""
-    langchain_tracing_v2: bool = False
+    langchain_api_key: str = os.getenv("LANGSMITH_API_KEY")
+    langchain_tracing_v2: bool = True
     langchain_project: str = "ai-investment-analyst"
 
     # ── App ───────────────────────────────────────────────────────────────────
@@ -24,11 +37,12 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "INFO"
+    log_file_path: str = str(BASE_DIR / "logs" / "app.log")
 
     # ── Vector DB (Qdrant local disk - completely free) ───────────────────────
-    qdrant_path: str = "./data/qdrant"
+    qdrant_path: str = str(BASE_DIR / "data" / "qdrant")
     qdrant_collection: str = "investments"
-    qdrant_vector_size: int = 768    # models/text_embedding_004 output dim
+    qdrant_vector_size: int = 3072
 
     # ── RAG Pipeline ─────────────────────────────────────────────────────────
     chunk_size: int = 512
@@ -37,7 +51,7 @@ class Settings(BaseSettings):
     crag_confidence_threshold: float = 0.4   # Below → fallback to web search
 
     # ── SQLite checkpointer (LangGraph state persistence) ─────────────────────
-    sqlite_db_path: str = "./data/checkpoints.db"
+    sqlite_db_path: str = str(BASE_DIR / "data" / "checkpoints.db")
 
     class Config:
         env_file = ".env"

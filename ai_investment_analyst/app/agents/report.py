@@ -81,6 +81,48 @@ Structure:
 Tone: professional, concise, institutional-grade."""
 
 
+def _build_fallback_report(state: AgentState, query: str, raw_error: Exception) -> InvestmentReport:
+    """Return a minimal but valid report when report generation is unavailable."""
+    sources = _sources_from_state(state)
+    analysis_summary = state.get("analysis_results", {}).get("summary", "")
+    research_summary = "\n".join(state.get("research_results", []))
+    summary = (
+        "Report generation used a fallback because the LLM was unavailable. "
+        "Review the research and analysis sections for the raw evidence."
+    )
+    if analysis_summary:
+        summary += f" Analysis snapshot: {analysis_summary[:220]}"
+    elif research_summary:
+        summary += f" Research snapshot: {research_summary[:220]}"
+
+    return InvestmentReport(
+        ticker=_extract_ticker_heuristic(query),
+        recommendation="HOLD",
+        confidence=0.0,
+        summary=summary,
+        key_risks=[
+            "Final report generation was unavailable due to LLM/API limits",
+            "Recommendation confidence is low because structured synthesis did not run",
+        ],
+        key_catalysts=[
+            "Retry once model quota resets",
+            "Use the research and portfolio metrics already gathered in this run",
+        ],
+        target_price=None,
+        sources=sources,
+    )
+
+
+def _build_fallback_narrative(report: InvestmentReport, raw_error: Exception) -> str:
+    """Return a simple narrative when LLM narrative generation is unavailable."""
+    return (
+        f"Recommendation: {report.recommendation} with confidence {report.confidence:.2f}.\n\n"
+        "This narrative was generated from a fallback path because the language model "
+        f"was unavailable: {raw_error}\n\n"
+        f"Summary: {report.summary}"
+    )
+
+
 def _extract_json_from_text(text: str) -> dict | None:
     """
     Multi-strategy JSON extraction for cases where the model adds extra text.
@@ -142,20 +184,25 @@ async def report_agent_node(state: AgentState) -> dict:
         analysis=analysis,
     )
 
-    raw_json = await llm_call(
-        prompt=json_prompt,
-        system_instruction=SYSTEM_PROMPT,
-        temperature=0.1,         # very low — structured output must be precise
-        max_output_tokens=1024,
-        json_mode=True,          # constrains Gemini to valid JSON output
-    )
+    try:
+        raw_json = await llm_call(
+            prompt=json_prompt,
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.1,         # very low — structured output must be precise
+            max_output_tokens=1024,
+            json_mode=True,          # constrains Gemini to valid JSON output
+        )
+    except Exception as e:
+        logger.warning(f"[Report] Structured report generation unavailable, using fallback: {e}")
+        raw_json = ""
+        report = _build_fallback_report(state, query, e)
 
     # ── Step 2: Parse + validate with Pydantic ────────────────────────────────
-    report: InvestmentReport | None = None
+    report: InvestmentReport | None = locals().get("report")
     sources = _sources_from_state(state)
 
-    parsed = _extract_json_from_text(raw_json)
-    if parsed is not None:
+    parsed = _extract_json_from_text(raw_json) if raw_json else None
+    if report is None and parsed is not None:
         try:
             # Inject sources from state if model left them empty
             if not parsed.get("sources") and sources:
@@ -192,12 +239,16 @@ async def report_agent_node(state: AgentState) -> dict:
         query=query,
         report_json=report.model_dump_json(indent=2),
     )
-    narrative = await llm_call(
-        prompt=narrative_prompt,
-        system_instruction=SYSTEM_PROMPT,
-        temperature=0.3,        # slightly higher — narrative can be more fluent
-        max_output_tokens=800,
-    )
+    try:
+        narrative = await llm_call(
+            prompt=narrative_prompt,
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.3,        # slightly higher — narrative can be more fluent
+            max_output_tokens=800,
+        )
+    except Exception as e:
+        logger.warning(f"[Report] Narrative generation unavailable, using fallback: {e}")
+        narrative = _build_fallback_narrative(report, e)
 
     logger.info("[Report] Complete")
 

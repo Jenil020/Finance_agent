@@ -32,7 +32,7 @@ except ModuleNotFoundError as exc:
 
 async def main():
     sample_files = [
-        "ai_investment_analyst/data/sample_docs/annual_report.pdf",
+        "data/sample_docs/annual_report.pdf",
         # Add more files here
     ]
     result = await ingest_documents(sample_files, metadata={"source": "manual"})

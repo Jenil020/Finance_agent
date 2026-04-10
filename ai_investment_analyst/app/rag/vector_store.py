@@ -23,24 +23,37 @@ def get_qdrant_client() -> QdrantClient:
         _ensure_collection(_client)
     return _client
 
-
 def _ensure_collection(client: QdrantClient) -> None:
-    """Create the collection if it doesn't exist yet."""
+    """Create the collection if it doesn't exist yet, or recreate it on dim mismatch."""
     existing = [c.name for c in client.get_collections().collections]
-    if settings.qdrant_collection not in existing:
-        client.create_collection(
-            collection_name=settings.qdrant_collection,
-            vectors_config=qdrant_models.VectorParams(
-                size=settings.qdrant_vector_size,   # 768 for models/text_embedding_004
-                distance=qdrant_models.Distance.COSINE,
-            ),
+    if settings.qdrant_collection in existing:
+        info = client.get_collection(settings.qdrant_collection)
+        vectors = getattr(info.config.params, "vectors", None)
+        current_size = getattr(vectors, "size", None)
+        if current_size == settings.qdrant_vector_size:
+            logger.debug(
+                f"[VectorStore] Collection '{settings.qdrant_collection}' already exists "
+                f"with dim={current_size}"
+            )
+            return
+
+        client.delete_collection(settings.qdrant_collection)
+        logger.warning(
+            f"[VectorStore] Recreating collection '{settings.qdrant_collection}' "
+            f"because dim={current_size} != configured dim={settings.qdrant_vector_size}"
         )
-        logger.info(
-            f"[VectorStore] Created collection '{settings.qdrant_collection}' "
-            f"(dim={settings.qdrant_vector_size}, distance=COSINE)"
-        )
-    else:
-        logger.debug(f"[VectorStore] Collection '{settings.qdrant_collection}' already exists")
+
+    client.create_collection(
+        collection_name=settings.qdrant_collection,
+        vectors_config=qdrant_models.VectorParams(
+            size=settings.qdrant_vector_size,
+            distance=qdrant_models.Distance.COSINE,
+        ),
+    )
+    logger.info(
+        f"[VectorStore] Created collection '{settings.qdrant_collection}' "
+        f"(dim={settings.qdrant_vector_size}, distance=COSINE)"
+    )
 
 
 def get_vector_store() -> QdrantVectorStore:
@@ -60,10 +73,11 @@ def get_collection_stats() -> dict:
     """Return collection size — useful for health checks and the /ingest endpoint."""
     client = get_qdrant_client()
     info = client.get_collection(settings.qdrant_collection)
+    vectors_count = getattr(info, "vectors_count", None) or getattr(info, "points_count", None)
     return {
         "collection": settings.qdrant_collection,
-        "vectors_count": info.vectors_count,
-        "points_count": info.points_count,
+        "vectors_count": vectors_count,
+        "points_count": getattr(info, "points_count", None),
         "status": str(info.status),
     }
 

@@ -27,6 +27,10 @@ HISTORY_PERIOD = "1y"             # 1 year of daily data for beta / Sharpe
 CONCENTRATION_WARNING = 0.40      # flag if any single position > 40% of portfolio
 
 
+def _portfolio_item_value(item: PortfolioItem | dict, field: str):
+    return item[field] if isinstance(item, dict) else getattr(item, field)
+
+
 # ── Sync helpers (run inside asyncio.to_thread) ───────────────────────────────
 
 def _fetch_prices(tickers: List[str]) -> pd.DataFrame:
@@ -149,7 +153,7 @@ def _compute_live_metrics(
 # ── Public tool ───────────────────────────────────────────────────────────────
 
 async def calculate_portfolio_metrics(
-    portfolio: List[PortfolioItem],
+    portfolio: List[PortfolioItem | dict],
 ) -> Dict[str, Any]:
     """
     Full portfolio analysis tool for the Analysis Agent.
@@ -167,20 +171,36 @@ async def calculate_portfolio_metrics(
         return {}
 
     # ── 1. Static metrics (always available) ──────────────────────────────
-    total_cost = sum(item.quantity * item.avg_cost for item in portfolio)
-    tickers = [item.ticker.upper() for item in portfolio]
+    total_cost = sum(
+        _portfolio_item_value(item, "quantity") * _portfolio_item_value(item, "avg_cost")
+        for item in portfolio
+    )
+    tickers = [str(_portfolio_item_value(item, "ticker")).upper() for item in portfolio]
 
     weights = {
-        item.ticker.upper(): round((item.quantity * item.avg_cost) / total_cost, 4)
+        str(_portfolio_item_value(item, "ticker")).upper(): round(
+            (
+                _portfolio_item_value(item, "quantity")
+                * _portfolio_item_value(item, "avg_cost")
+            ) / total_cost,
+            4,
+        )
         for item in portfolio
     }
 
     positions = {
-        item.ticker.upper(): {
-            "quantity": item.quantity,
-            "avg_cost": item.avg_cost,
-            "cost_basis": round(item.quantity * item.avg_cost, 2),
-            "weight_pct": round(weights[item.ticker.upper()] * 100, 2),
+        str(_portfolio_item_value(item, "ticker")).upper(): {
+            "quantity": _portfolio_item_value(item, "quantity"),
+            "avg_cost": _portfolio_item_value(item, "avg_cost"),
+            "cost_basis": round(
+                _portfolio_item_value(item, "quantity")
+                * _portfolio_item_value(item, "avg_cost"),
+                2,
+            ),
+            "weight_pct": round(
+                weights[str(_portfolio_item_value(item, "ticker")).upper()] * 100,
+                2,
+            ),
         }
         for item in portfolio
     }

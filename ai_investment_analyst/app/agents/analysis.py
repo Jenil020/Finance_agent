@@ -89,6 +89,38 @@ Write a quantitative assessment (300-400 words) covering:
 Be precise. Use numbers from the research brief where available."""
 
 
+def _build_analysis_fallback(
+    query: str,
+    research: str,
+    portfolio,
+    raw_metrics: dict,
+    llm_error: Exception,
+) -> str:
+    """Return a readable fallback analysis when LLM analysis is unavailable."""
+    if portfolio:
+        return (
+            "QUANTITATIVE ANALYSIS FALLBACK\n"
+            f"Query: {query}\n\n"
+            "LLM-based analysis was unavailable, so returning raw portfolio metrics.\n"
+            f"LLM error: {llm_error}\n\n"
+            "RESEARCH INPUT:\n"
+            f"{research}\n\n"
+            "PORTFOLIO SNAPSHOT:\n"
+            f"{_format_portfolio_summary(portfolio)}\n\n"
+            "RAW METRICS:\n"
+            f"{json.dumps(raw_metrics, indent=2, default=str)}"
+        )
+
+    return (
+        "STOCK ANALYSIS FALLBACK\n"
+        f"Query: {query}\n\n"
+        "LLM-based analysis was unavailable, so returning the research brief directly.\n"
+        f"LLM error: {llm_error}\n\n"
+        "RESEARCH INPUT:\n"
+        f"{research}"
+    )
+
+
 def _format_portfolio_summary(portfolio) -> str:
     """Format portfolio items into a readable table string."""
     if not portfolio:
@@ -96,9 +128,12 @@ def _format_portfolio_summary(portfolio) -> str:
     lines = ["Ticker  |  Qty   |  Avg Cost  |  Cost Basis"]
     lines.append("-" * 44)
     for item in portfolio:
-        cost = item.quantity * item.avg_cost
+        ticker = item["ticker"] if isinstance(item, dict) else item.ticker
+        quantity = item["quantity"] if isinstance(item, dict) else item.quantity
+        avg_cost = item["avg_cost"] if isinstance(item, dict) else item.avg_cost
+        cost = quantity * avg_cost
         lines.append(
-            f"{item.ticker:<8}|{item.quantity:>7.1f} |${item.avg_cost:>9.2f} |${cost:>10.2f}"
+            f"{ticker:<8}|{quantity:>7.1f} |${avg_cost:>9.2f} |${cost:>10.2f}"
         )
     return "\n".join(lines)
 
@@ -134,12 +169,22 @@ async def analysis_agent_node(state: AgentState) -> dict:
                 metrics_json=metrics_json,
             )
 
-            analysis_text = await llm_call(
-                prompt=prompt,
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.15,
-                max_output_tokens=1500,
-            )
+            try:
+                analysis_text = await llm_call(
+                    prompt=prompt,
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.15,
+                    max_output_tokens=1500,
+                )
+            except Exception as e:
+                logger.warning(f"[Analysis] LLM analysis unavailable, using fallback: {e}")
+                analysis_text = _build_analysis_fallback(
+                    query=query,
+                    research=research,
+                    portfolio=portfolio,
+                    raw_metrics=raw_metrics,
+                    llm_error=e,
+                )
 
             return {
                 "analysis_results": {
@@ -165,12 +210,22 @@ async def analysis_agent_node(state: AgentState) -> dict:
                 research=research,
             )
 
-            analysis_text = await llm_call(
-                prompt=prompt,
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.15,
-                max_output_tokens=1000,
-            )
+            try:
+                analysis_text = await llm_call(
+                    prompt=prompt,
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.15,
+                    max_output_tokens=1000,
+                )
+            except Exception as e:
+                logger.warning(f"[Analysis] LLM analysis unavailable, using fallback: {e}")
+                analysis_text = _build_analysis_fallback(
+                    query=query,
+                    research=research,
+                    portfolio=portfolio,
+                    raw_metrics={},
+                    llm_error=e,
+                )
 
             return {
                 "analysis_results": {

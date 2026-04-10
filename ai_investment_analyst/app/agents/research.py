@@ -62,6 +62,36 @@ _COMMON_WORDS = {
 }
 
 
+def _build_fallback_research_brief(
+    query: str,
+    rag_confidence: float,
+    rag_context: str,
+    market_data: str,
+    web_context: str,
+    llm_error: Exception,
+) -> str:
+    """Return a readable fallback brief when LLM synthesis is unavailable."""
+    rag_summary = rag_context if rag_context.strip() else "No internal knowledge base context was available."
+    web_summary = web_context if web_context.strip() else "Web and news search returned no usable context."
+    return (
+        "OVERVIEW:\n"
+        f"Automated research synthesis was unavailable for query: {query}\n\n"
+        "KEY FACTS:\n"
+        f"- RAG confidence: {rag_confidence:.2f}\n"
+        f"- Live market data:\n{market_data}\n"
+        f"- LLM synthesis error: {llm_error}\n\n"
+        "RECENT NEWS:\n"
+        f"{web_summary}\n\n"
+        "DATA GAPS:\n"
+        "- Research summary fell back to raw evidence because Gemini synthesis was unavailable.\n"
+        f"- Internal knowledge base context:\n{rag_summary}\n\n"
+        "SOURCES:\n"
+        "- RAG\n"
+        "- yfinance\n"
+        "- web_search"
+    )
+
+
 def _extract_ticker(query: str) -> str | None:
     """
     Heuristically extract a stock ticker from the query.
@@ -140,12 +170,23 @@ async def research_agent_node(state: AgentState) -> dict:
             web_context=web_context,
         )
 
-        synthesis = await llm_call(
-            prompt=prompt,
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.1,        # low temp — we want factual, not creative
-            max_output_tokens=1024,
-        )
+        try:
+            synthesis = await llm_call(
+                prompt=prompt,
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.1,        # low temp — we want factual, not creative
+                max_output_tokens=1024,
+            )
+        except Exception as e:
+            logger.warning(f"[Research] LLM synthesis unavailable, using fallback brief: {e}")
+            synthesis = _build_fallback_research_brief(
+                query=query,
+                rag_confidence=rag_confidence,
+                rag_context=rag_context,
+                market_data=market_data,
+                web_context=web_context,
+                llm_error=e,
+            )
 
         # Combine all sources
         all_sources = list(set(rag_sources + (["yfinance"] if ticker else []) + ["web_search"]))

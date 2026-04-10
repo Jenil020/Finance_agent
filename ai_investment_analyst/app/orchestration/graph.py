@@ -112,6 +112,25 @@ def _node_display_name(node: str) -> str:
     }.get(node, node)
 
 
+def _serialise_portfolio(portfolio) -> list[dict]:
+    """Store only plain dicts in checkpoints to avoid custom-type msgpack warnings."""
+    result = []
+    for item in portfolio or []:
+        if hasattr(item, "model_dump"):
+            result.append(item.model_dump())
+        elif isinstance(item, dict):
+            result.append(item)
+        else:
+            result.append(
+                {
+                    "ticker": getattr(item, "ticker"),
+                    "quantity": getattr(item, "quantity"),
+                    "avg_cost": getattr(item, "avg_cost"),
+                }
+            )
+    return result
+
+
 # ── Public streaming interface ────────────────────────────────────────────────
 
 async def run_agent_stream(
@@ -140,7 +159,7 @@ async def run_agent_stream(
     initial_state: AgentState = {
         "query":            query,
         "session_id":       session_id,
-        "portfolio":        portfolio or [],
+        "portfolio":        _serialise_portfolio(portfolio),
         "messages":         [],
         "research_results": [],
         "analysis_results": {},

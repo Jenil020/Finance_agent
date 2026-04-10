@@ -30,6 +30,30 @@ def _is_retryable(exc: Exception) -> bool:
     return any(k in msg for k in ["429", "503", "quota", "resource exhausted", "timeout"])
 
 
+def _is_model_not_found(exc: Exception) -> bool:
+    """Return True when Gemini rejects the requested model name."""
+    msg = str(exc).lower()
+    return "404" in msg and "not found" in msg and "model" in msg
+
+
+def _is_service_overloaded(exc: Exception) -> bool:
+    """Return True when Gemini is temporarily overloaded or unavailable."""
+    msg = str(exc).lower()
+    return "503" in msg or "unavailable" in msg or "high demand" in msg
+
+
+def _candidate_models() -> list[str]:
+    """Try the configured model first, then fall back to known-safe aliases."""
+    ordered = [settings.gemini_model, *settings.gemini_model_fallbacks]
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for model in ordered:
+        if model and model not in seen:
+            candidates.append(model)
+            seen.add(model)
+    return candidates
+
+
 # ── Singleton client ──────────────────────────────────────────────────────────
 
 _client: genai.Client | None = None
@@ -45,7 +69,10 @@ def get_client() -> genai.Client:
                 "Get a free key at https://aistudio.google.com/app/apikey"
             )
         _client = genai.Client(api_key=settings.google_api_key)
-        logger.info(f"[LLM] Gemini client initialised (model={settings.gemini_model})")
+        logger.info(
+            f"[LLM] Gemini client initialised "
+            f"(primary_model={settings.gemini_model}, fallbacks={list(settings.gemini_model_fallbacks)})"
+        )
     return _client
 
 
@@ -88,18 +115,35 @@ async def llm_call(
         response_mime_type="application/json" if json_mode else "text/plain",
     )
 
-    try:
-        response = await client.aio.models.generate_content(
-            model=settings.gemini_model,
-            contents=prompt,
-            config=config,
-        )
-    except Exception as e:
-        if _is_retryable(e):
-            logger.warning(f"[LLM] Transient error, will retry: {e}")
-            raise   # tenacity catches and retries
-        logger.error(f"[LLM] Non-retryable error: {e}")
-        raise
+    last_error: Exception | None = None
+    candidates = _candidate_models()
+    for i, model_name in enumerate(candidates):
+        try:
+            response = await client.aio.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            )
+            if model_name != settings.gemini_model:
+                logger.warning(
+                    f"[LLM] Falling back from {settings.gemini_model} to supported model {model_name}"
+                )
+            break
+        except Exception as e:
+            last_error = e
+            if _is_model_not_found(e) and i < len(candidates) - 1:
+                logger.warning(f"[LLM] Model unavailable: {model_name}. Trying fallback.")
+                continue
+            if _is_service_overloaded(e) and i < len(candidates) - 1:
+                logger.warning(f"[LLM] Model overloaded: {model_name}. Trying fallback.")
+                continue
+            if _is_retryable(e):
+                logger.warning(f"[LLM] Transient error, will retry: {e}")
+                raise   # tenacity catches and retries
+            logger.error(f"[LLM] Non-retryable error: {e}")
+            raise
+    else:
+        raise last_error or RuntimeError("Gemini generation failed without a concrete error.")
 
     text = response.text
     if text is None:
@@ -138,10 +182,31 @@ async def llm_call_stream(
         max_output_tokens=max_output_tokens,
     )
 
-    async for chunk in await client.aio.models.generate_content_stream(
-        model=settings.gemini_model,
-        contents=prompt,
-        config=config,
-    ):
-        if chunk.text:
-            yield chunk.text
+    last_error: Exception | None = None
+    candidates = _candidate_models()
+
+    for i, model_name in enumerate(candidates):
+        try:
+            async for chunk in await client.aio.models.generate_content_stream(
+                model=model_name,
+                contents=prompt,
+                config=config,
+            ):
+                if chunk.text:
+                    yield chunk.text
+            return
+        except Exception as e:
+            last_error = e
+            if _is_model_not_found(e) and i < len(candidates) - 1:
+                logger.warning(f"[LLM] Stream model unavailable: {model_name}. Trying fallback.")
+                continue
+            if _is_service_overloaded(e) and i < len(candidates) - 1:
+                logger.warning(f"[LLM] Stream model overloaded: {model_name}. Trying fallback.")
+                continue
+            if _is_retryable(e):
+                logger.warning(f"[LLM] Transient stream error: {e}")
+            else:
+                logger.error(f"[LLM] Streaming error: {e}")
+            raise
+
+    raise last_error or RuntimeError("Gemini streaming failed without a concrete error.")

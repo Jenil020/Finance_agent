@@ -10,9 +10,13 @@ Two search types:
   news_search_tool — recent news only (past week), higher signal for stocks
 """
 import asyncio
+import time
 from typing import List
 from ddgs import DDGS
 from app.core.logging import logger
+
+
+SEARCH_TIMEOUT_SECONDS = 15
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -88,17 +92,30 @@ async def web_search_tool(
     """
     search_query = f"{query} investment finance" if finance_context else query
     logger.info(f"[WebSearch] text | query='{search_query[:80]}'")
+    start = time.perf_counter()
 
     try:
-        results = await asyncio.to_thread(
-            _run_text_search, search_query, max_results
+        results = await asyncio.wait_for(
+            asyncio.to_thread(_run_text_search, search_query, max_results),
+            timeout=SEARCH_TIMEOUT_SECONDS,
         )
         formatted = _format_text_results(results)
-        logger.info(f"[WebSearch] Got {len(results)} text results")
+        elapsed = time.perf_counter() - start
+        logger.info(
+            f"[WebSearch] Got {len(results)} text results in {elapsed:.2f}s"
+        )
         return formatted
 
+    except asyncio.TimeoutError:
+        elapsed = time.perf_counter() - start
+        logger.error(
+            f"[WebSearch] text search timed out after {elapsed:.2f}s "
+            f"(limit={SEARCH_TIMEOUT_SECONDS}s)"
+        )
+        return "[WebSearch unavailable: timed out]"
     except Exception as e:
-        logger.error(f"[WebSearch] text search failed: {e}")
+        elapsed = time.perf_counter() - start
+        logger.error(f"[WebSearch] text search failed after {elapsed:.2f}s: {e}")
         return f"[WebSearch unavailable: {e}]"
 
 
@@ -118,17 +135,30 @@ async def news_search_tool(
         Formatted string of news items ready for LLM consumption.
     """
     logger.info(f"[WebSearch] news | query='{query[:80]}'")
+    start = time.perf_counter()
 
     try:
-        results = await asyncio.to_thread(
-            _run_news_search, query, max_results
+        results = await asyncio.wait_for(
+            asyncio.to_thread(_run_news_search, query, max_results),
+            timeout=SEARCH_TIMEOUT_SECONDS,
         )
         formatted = _format_news_results(results)
-        logger.info(f"[WebSearch] Got {len(results)} news results")
+        elapsed = time.perf_counter() - start
+        logger.info(
+            f"[WebSearch] Got {len(results)} news results in {elapsed:.2f}s"
+        )
         return formatted
 
+    except asyncio.TimeoutError:
+        elapsed = time.perf_counter() - start
+        logger.error(
+            f"[WebSearch] news search timed out after {elapsed:.2f}s "
+            f"(limit={SEARCH_TIMEOUT_SECONDS}s)"
+        )
+        return "[NewsSearch unavailable: timed out]"
     except Exception as e:
-        logger.error(f"[WebSearch] news search failed: {e}")
+        elapsed = time.perf_counter() - start
+        logger.error(f"[WebSearch] news search failed after {elapsed:.2f}s: {e}")
         return f"[NewsSearch unavailable: {e}]"
 
 
@@ -150,6 +180,7 @@ async def combined_search_tool(
     news_task = news_search_tool(query, max_results=max_news)
 
     web_results, news_results = await asyncio.gather(web_task, news_task)
+    logger.info("[WebSearch] combined search complete")
 
     return (
         f"=== WEB RESULTS ===\n{web_results}\n\n"

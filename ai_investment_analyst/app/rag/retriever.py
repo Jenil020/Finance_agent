@@ -12,6 +12,7 @@ Why CRAG?
   - We flag this so the Research Agent knows to fall back to web search
   - Prevents hallucinated answers from irrelevant context
 """
+import asyncio
 from typing import List, Tuple
 from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.core.retrievers import VectorIndexRetriever, QueryFusionRetriever
@@ -35,12 +36,15 @@ def build_index(vector_store, embed_model) -> VectorStoreIndex:
     return index
 
 
-def get_hybrid_retriever(index: VectorStoreIndex) -> QueryFusionRetriever:
+def get_hybrid_retriever(index: VectorStoreIndex) -> VectorIndexRetriever:
     """
     Build a hybrid retriever combining BM25 + Vector search.
 
     Uses Reciprocal Rank Fusion (RRF) to merge ranked lists — no score
     calibration needed, robust to different score scales.
+    
+    Falls back to vector-only if BM25 cannot be initialized (e.g., loading
+    from existing Qdrant without node docstore).
     """
     vector_retriever = VectorIndexRetriever(
         index=index,
@@ -48,24 +52,35 @@ def get_hybrid_retriever(index: VectorStoreIndex) -> QueryFusionRetriever:
     )
 
     # BM25 works on nodes already stored in the index's docstore
-    bm25_retriever = BM25Retriever.from_defaults(
-        index=index,
-        similarity_top_k=settings.top_k,
-        skip_stemming=False,    # stemming improves recall for financial terms
-        language="en",
-    )
+    # If nodes are not available (e.g., when loading from existing Qdrant),
+    # we fall back to vector-only retrieval
+    try:
+        bm25_retriever = BM25Retriever.from_defaults(
+            index=index,
+            similarity_top_k=settings.top_k,
+            skip_stemming=False,    # stemming improves recall for financial terms
+            language="en",
+        )
 
-    # QueryFusionRetriever merges and re-ranks results
-    hybrid_retriever = QueryFusionRetriever(
-        retrievers=[vector_retriever, bm25_retriever],
-        retriever_weights=[0.6, 0.4],   # slightly favour semantic over keyword
-        similarity_top_k=settings.top_k,
-        num_queries=1,          # no LLM-generated sub-queries (saves API calls)
-        mode="reciprocal_rerank",
-        use_async=True,
-    )
-
-    return hybrid_retriever
+        # QueryFusionRetriever merges and re-ranks results
+        # Note: num_queries=1 means it won't generate sub-queries (no LLM call)
+        hybrid_retriever = QueryFusionRetriever(
+            retrievers=[vector_retriever, bm25_retriever],
+            retriever_weights=[0.6, 0.4],   # slightly favour semantic over keyword
+            similarity_top_k=settings.top_k,
+            num_queries=1,          # no LLM-generated sub-queries (saves API calls)
+            mode="reciprocal_rerank",
+            use_async=True,
+        )
+        return hybrid_retriever
+    except (ValueError, Exception) as e:
+        logger.warning(
+            f"[Retriever] BM25 initialization failed: {e}. "
+            "Using vector-only retrieval. "
+            "(This is expected when loading from existing Qdrant. "
+            "BM25 will work after re-ingestion.)"
+        )
+        return vector_retriever
 
 
 async def crag_retrieve(
@@ -86,7 +101,9 @@ async def crag_retrieve(
     Returns:
         (nodes, confidence)  where confidence ∈ [0.0, 1.0]
     """
-    nodes: List[NodeWithScore] = await retriever.aretrieve(query)
+    # Local-disk Qdrant cannot be opened twice for sync + async access.
+    # Run sync retrieval in a worker thread to keep the async app responsive.
+    nodes: List[NodeWithScore] = await asyncio.to_thread(retriever.retrieve, query)
 
     if not nodes:
         logger.warning(f"[CRAG] Zero nodes retrieved for: '{query[:60]}'")

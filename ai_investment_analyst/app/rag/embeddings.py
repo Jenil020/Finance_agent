@@ -49,8 +49,8 @@ class SimpleRateLimiter:
     Token-bucket style rate limiter with a minimum inter-call interval.
 
     LlamaIndex calls self.rate_limiter.acquire() before each batch flush
-    (see BaseEmbedding.get_text_embedding_batch). This gives us a clean
-    hook to insert a sleep without monkey-patching LlamaIndex internals.
+    (see BaseEmbedding.get_text_embedding_batch). It may also call
+    async_acquire() when using async embedding flows.
     """
 
     def __init__(self, requests_per_second: float = 8.0):
@@ -63,6 +63,14 @@ class SimpleRateLimiter:
         wait = self._min_interval - elapsed
         if wait > 0:
             time.sleep(wait)
+        self._last_call = time.monotonic()
+
+    async def async_acquire(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_call
+        wait = self._min_interval - elapsed
+        if wait > 0:
+            await asyncio.sleep(wait)
         self._last_call = time.monotonic()
 
 
@@ -98,6 +106,7 @@ class GeminiEmbedding(BaseEmbedding):
 
     model_name: str = Field(default="gemini-embedding-001")
     api_key: str = Field(default="")
+    output_dimensionality: int = Field(default=3072)
 
     # Non-pydantic private attribute for the client
     _client: genai.Client = None  # type: ignore[assignment]
@@ -119,7 +128,10 @@ class GeminiEmbedding(BaseEmbedding):
         response = client.models.embed_content(
             model=self.model_name,
             contents=text,
-            config=genai_types.EmbedContentConfig(task_type=task_type),
+            config=genai_types.EmbedContentConfig(
+                task_type=task_type,
+                output_dimensionality=self.output_dimensionality,
+            ),
         )
         return list(response.embeddings[0].values)
 
@@ -151,7 +163,10 @@ class GeminiEmbedding(BaseEmbedding):
         response = await client.aio.models.embed_content(
             model=self.model_name,
             contents=query,
-            config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
+            config=genai_types.EmbedContentConfig(
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=self.output_dimensionality,
+            ),
         )
         return list(response.embeddings[0].values)
 
@@ -160,7 +175,10 @@ class GeminiEmbedding(BaseEmbedding):
         response = await client.aio.models.embed_content(
             model=self.model_name,
             contents=text,
-            config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+            config=genai_types.EmbedContentConfig(
+                task_type="RETRIEVAL_DOCUMENT",
+                output_dimensionality=self.output_dimensionality,
+            ),
         )
         return list(response.embeddings[0].values)
 
@@ -192,6 +210,7 @@ def get_embed_model() -> GeminiEmbedding:
         _embed_model = GeminiEmbedding(
             model_name=settings.gemini_embed_model,
             api_key=settings.google_api_key,
+            output_dimensionality=settings.gemini_embed_output_dim,
             embed_batch_size=5,            # 5 texts per LlamaIndex batch call
             rate_limiter=SimpleRateLimiter(
                 requests_per_second=8.0    # 8 RPS << free tier limit of 25 RPS
@@ -199,6 +218,6 @@ def get_embed_model() -> GeminiEmbedding:
         )
         logger.info(
             f"[Embeddings] Model ready: {settings.gemini_embed_model} "
-            f"| batch_size=5 | rate=8 RPS"
+            f"| dim={settings.gemini_embed_output_dim} | batch_size=5 | rate=8 RPS"
         )
     return _embed_model
